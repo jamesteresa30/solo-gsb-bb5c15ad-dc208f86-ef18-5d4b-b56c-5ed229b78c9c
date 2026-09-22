@@ -77,3 +77,81 @@ class AnalysisListItem(BaseModel):
 class AnalysisListResponse(BaseModel):
     total: int
     items: list[AnalysisListItem]
+
+
+class CompareRequest(BaseModel):
+    """POST /api/analyses/compare 请求体。"""
+
+    baseline_id: int = Field(..., ge=1, description="基线分析记录 ID")
+    current_id: int = Field(..., ge=1, description="当前分析记录 ID")
+
+
+class ComparedIssue(BaseModel):
+    """对比结果中的一条 issue（含稳定指纹，不含反例等大字段）。"""
+
+    fingerprint: str
+    direction: Literal["backward", "forward"]
+    path: str
+    code: str
+    severity: Literal["error", "warning"]
+    message: str
+    reason: str
+
+
+class SeverityChangedIssue(ComparedIssue):
+    baseline_severity: Literal["error", "warning"]
+    current_severity: Literal["error", "warning"]
+
+
+class IssueGroups(BaseModel):
+    added: list[ComparedIssue]
+    fixed: list[ComparedIssue]
+    persisting: list[ComparedIssue]
+    severity_changed: list[SeverityChangedIssue]
+
+
+class IssueGroupCounts(BaseModel):
+    added: int
+    fixed: int
+    persisting: int
+    severity_changed: int
+
+
+class CompatibilityChange(BaseModel):
+    baseline: bool
+    current: bool
+    changed: bool
+
+
+class CompatibilityDiff(BaseModel):
+    backward: CompatibilityChange
+    forward: CompatibilityChange
+
+
+class MetricDiff(BaseModel):
+    baseline: int
+    current: int
+    delta: int
+
+
+class DirectionSummaryDiff(BaseModel):
+    errors: MetricDiff
+    warnings: MetricDiff
+    total: MetricDiff
+
+
+class SummaryDiff(BaseModel):
+    errors: MetricDiff
+    warnings: MetricDiff
+    total: MetricDiff
+    backward: DirectionSummaryDiff
+    forward: DirectionSummaryDiff
+
+
+class CompareResponse(BaseModel):
+    baseline_id: int
+    current_id: int
+    compatibility: CompatibilityDiff
+    summary_diff: SummaryDiff
+    issues: IssueGroups
+    counts: IssueGroupCounts

@@ -7,13 +7,15 @@ from jsonschema.exceptions import SchemaError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import compat
+from app import compat, compare
 from app.database import get_db, init_db
 from app.models import Analysis
 from app.schemas import (
     AnalysisCreate,
     AnalysisListResponse,
     AnalysisResponse,
+    CompareRequest,
+    CompareResponse,
 )
 
 
@@ -102,6 +104,30 @@ def list_analyses(limit: int = 50, offset: int = 0, db: Session = Depends(get_db
         for row in rows
     ]
     return {"total": len(items), "items": items}
+
+
+@app.post(
+    "/api/analyses/compare",
+    response_model=CompareResponse,
+    tags=["analyses"],
+    summary="对比两次分析报告（基线 vs 当前）",
+)
+def compare_analyses(payload: CompareRequest, db: Session = Depends(get_db)):
+    # 只读取两份报告做对比，绝不修改原始分析记录
+    baseline = db.get(Analysis, payload.baseline_id)
+    if baseline is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"基线分析记录不存在: {payload.baseline_id}",
+        )
+    current = db.get(Analysis, payload.current_id)
+    if current is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"当前分析记录不存在: {payload.current_id}",
+        )
+    result = compare.compare_reports(baseline.report, current.report)
+    return {"baseline_id": baseline.id, "current_id": current.id, **result}
 
 
 @app.get(

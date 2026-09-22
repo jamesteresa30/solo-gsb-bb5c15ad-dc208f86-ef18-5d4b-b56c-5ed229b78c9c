@@ -102,3 +102,149 @@ def test_compatible_schemas(client):
     assert report["backward_compatible"]
     assert report["forward_compatible"]
     assert report["summary"]["errors"] == 0
+
+
+# ---------------------------------------------------------------------------
+# POST /api/analyses/compare
+# ---------------------------------------------------------------------------
+
+COMPARE_OLD = {
+    "type": "object",
+    "properties": {"a": {"type": "string"}},
+    "required": ["a"],
+}
+# v2：a 收紧 minLength、新增必填 b
+COMPARE_V2 = {
+    "type": "object",
+    "properties": {"a": {"type": "string", "minLength": 2},
+                   "b": {"type": "integer"}},
+    "required": ["a", "b"],
+}
+# v3：b 不再必填（修复）、新增必填 c（新引入）、a 的 minLength 保持（仍存在）
+COMPARE_V3 = {
+    "type": "object",
+    "properties": {"a": {"type": "string", "minLength": 2},
+                   "c": {"type": "string"}},
+    "required": ["a", "c"],
+}
+
+
+def _create(client, old_schema, new_schema, name=None):
+    resp = client.post("/api/analyses", json={
+        "name": name, "old_schema": old_schema, "new_schema": new_schema,
+    })
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def test_compare_added_fixed_persisting(client):
+    baseline = _create(client, COMPARE_OLD, COMPARE_V2, "baseline")
+    current = _create(client, COMPARE_OLD, COMPARE_V3, "current")
+
+    resp = client.post("/api/analyses/compare", json={
+        "baseline_id": baseline["id"], "current_id": current["id"],
+    })
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    assert data["baseline_id"] == baseline["id"]
+    assert data["current_id"] == current["id"]
+    assert data["counts"] == {"added": 1, "fixed": 1, "persisting": 1,
+                              "severity_changed": 0}
+
+    added = data["issues"]["added"]
+    fixed = data["issues"]["fixed"]
+    persisting = data["issues"]["persisting"]
+    assert [i["code"] for i in added] == ["required_added"]
+    assert "'c'" in added[0]["reason"]
+    assert [i["code"] for i in fixed] == ["required_added"]
+    assert "'b'" in fixed[0]["reason"]
+    assert [i["code"] for i in persisting] == ["min_length_increased"]
+
+    # 每条对比 issue 都带稳定指纹
+    for group in (added, fixed, persisting):
+        for entry in group:
+            assert len(entry["fingerprint"]) == 16
+
+    # 双向兼容性：两个方向都保持不兼容 -> changed 为 False
+    assert data["compatibility"]["backward"] == {
+        "baseline": False, "current": False, "changed": False,
+    }
+    assert data["compatibility"]["forward"] == {
+        "baseline": True, "current": True, "changed": False,
+    }
+
+    # 错误 / 警告汇总差异
+    diff = data["summary_diff"]
+    assert diff["errors"]["baseline"] == baseline["report"]["summary"]["errors"]
+    assert diff["errors"]["current"] == current["report"]["summary"]["errors"]
+    assert diff["errors"]["delta"] == (
+        current["report"]["summary"]["errors"]
+        - baseline["report"]["summary"]["errors"]
+    )
+    assert diff["warnings"]["delta"] == 0
+    assert diff["backward"]["errors"]["baseline"] == 2
+
+
+def test_compare_severity_only_change(client):
+    # 同一 integer_required 问题：baseline 可构造验证反例（error），
+    # current 中 maximum 限制使反例不再成立（降级 warning）
+    baseline = _create(client, {"minimum": 0}, {"type": "integer"})
+    current = _create(client, {"minimum": 0, "maximum": 1}, {"type": "integer"})
+
+    resp = client.post("/api/analyses/compare", json={
+        "baseline_id": baseline["id"], "current_id": current["id"],
+    })
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    changed = data["issues"]["severity_changed"]
+    assert data["counts"]["severity_changed"] == 1
+    assert changed[0]["code"] == "integer_required"
+    assert changed[0]["baseline_severity"] == "error"
+    assert changed[0]["current_severity"] == "warning"
+    # 仍存在：type_restricted 两份报告都有
+    assert any(i["code"] == "type_restricted" for i in data["issues"]["persisting"])
+
+
+def test_compare_does_not_modify_reports(client):
+    baseline = _create(client, COMPARE_OLD, COMPARE_V2)
+    current = _create(client, COMPARE_OLD, COMPARE_V3)
+
+    resp = client.post("/api/analyses/compare", json={
+        "baseline_id": baseline["id"], "current_id": current["id"],
+    })
+    assert resp.status_code == 200
+
+    for original in (baseline, current):
+        after = client.get(f"/api/analyses/{original['id']}").json()
+        assert after["report"] == original["report"]
+        assert after["old_schema"] == original["old_schema"]
+        assert after["new_schema"] == original["new_schema"]
+
+
+def test_compare_self_all_persisting(client):
+    analysis = _create(client, COMPARE_OLD, COMPARE_V2)
+    resp = client.post("/api/analyses/compare", json={
+        "baseline_id": analysis["id"], "current_id": analysis["id"],
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    total = analysis["report"]["summary"]["total"]
+    assert data["counts"]["persisting"] == total
+    assert data["counts"]["added"] == 0
+    assert data["counts"]["fixed"] == 0
+
+
+def test_compare_missing_analysis_returns_404(client):
+    analysis = _create(client, COMPARE_OLD, COMPARE_V2)
+
+    resp = client.post("/api/analyses/compare", json={
+        "baseline_id": 999999, "current_id": analysis["id"],
+    })
+    assert resp.status_code == 404
+
+    resp = client.post("/api/analyses/compare", json={
+        "baseline_id": analysis["id"], "current_id": 999999,
+    })
+    assert resp.status_code == 404

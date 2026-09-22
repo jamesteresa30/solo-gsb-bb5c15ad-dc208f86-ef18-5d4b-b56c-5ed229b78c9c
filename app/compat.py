@@ -540,6 +540,12 @@ def resolve_tuple_placeholders(rendered: str, mapping: dict[str, str]) -> str:
     return "/".join(out)
 
 
+# 启发式问题降级为 warning 时在 reason 末尾追加的说明。
+# 基线对比（app.compare）规范化 reason 时会剥离该后缀，
+# 以便识别"同一问题仅严重级别变化"的情况。
+HEURISTIC_SUFFIX = "（未能自动构造出经过验证的反例，标记为潜在风险）"
+
+
 class IssueBuilder:
     def __init__(self, source_root: Any, target_root: Any, source_validator, target_validator):
         self.source_root = source_root
@@ -581,7 +587,7 @@ class IssueBuilder:
                 self.raw.append({
                     "path": self._render(path), "code": code, "severity": "warning",
                     "message": message,
-                    "reason": reason + "（未能自动构造出经过验证的反例，标记为潜在风险）",
+                    "reason": reason + HEURISTIC_SUFFIX,
                     "counterexample": None, "counterexample_path": None,
                 })
             return

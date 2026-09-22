@@ -16,13 +16,15 @@
 ```
 .
 ├── app/
-│   ├── main.py          # FastAPI 路由：创建分析、查询报告
+│   ├── main.py          # FastAPI 路由：创建分析、查询报告、基线对比
 │   ├── compat.py        # 兼容性分析引擎（递归比较 + 最小反例生成）
+│   ├── compare.py       # 报告基线对比（issue 指纹 + 新增/修复/仍存/级别变化分类）
 │   ├── database.py      # SQLite / SQLAlchemy 初始化
 │   ├── models.py        # Analysis ORM 模型
 │   └── schemas.py       # Pydantic 请求 / 响应模型
 ├── tests/
 │   ├── test_compat.py   # 引擎单元测试（30+ 用例）
+│   ├── test_compare.py  # 基线对比单元测试
 │   └── test_api.py      # 接口端到端测试
 ├── Dockerfile
 ├── docker-compose.yml
@@ -246,6 +248,86 @@ curl http://localhost:8000/api/analyses/1
 ```
 
 记录不存在返回 `404`。
+
+### `POST /api/analyses/compare` — 基线对比两次分析报告
+
+接收 `baseline_id` 与 `current_id`，对两份已落库的报告做差异分析。
+接口为**纯只读**操作，不会修改任何原始报告。
+
+请求体：
+
+| 字段          | 类型 | 必填 | 说明           |
+| ------------- | ---- | ---- | -------------- |
+| `baseline_id` | int  | 是   | 基线分析记录 ID |
+| `current_id`  | int  | 是   | 当前分析记录 ID |
+
+```bash
+curl -X POST http://localhost:8000/api/analyses/compare \
+  -H "Content-Type: application/json" \
+  -d '{"baseline_id": 1, "current_id": 2}'
+```
+
+响应（节选）：
+
+```json
+{
+  "baseline_id": 1,
+  "current_id": 2,
+  "compatibility": {
+    "backward": { "baseline": false, "current": true, "changed": true },
+    "forward":  { "baseline": true,  "current": true, "changed": false }
+  },
+  "summary_diff": {
+    "errors":   { "baseline": 4, "current": 1, "delta": -3 },
+    "warnings": { "baseline": 0, "current": 1, "delta": 1 },
+    "total":    { "baseline": 4, "current": 2, "delta": -2 },
+    "backward": { "errors": { "baseline": 3, "current": 0, "delta": -3 },
+                  "warnings": { "baseline": 0, "current": 1, "delta": 1 },
+                  "total":    { "baseline": 3, "current": 1, "delta": -2 } },
+    "forward":  { "errors": { "baseline": 1, "current": 1, "delta": 0 },
+                  "warnings": { "baseline": 0, "current": 0, "delta": 0 },
+                  "total":    { "baseline": 1, "current": 1, "delta": 0 } }
+  },
+  "issues": {
+    "added":            [ { "fingerprint": "9f2c…", "direction": "backward",
+                            "path": "#", "code": "required_added", … } ],
+    "fixed":            [ … ],
+    "persisting":       [ … ],
+    "severity_changed": [ { "fingerprint": "51ab…", "code": "integer_required",
+                            "baseline_severity": "error",
+                            "current_severity": "warning", … } ]
+  },
+  "counts": { "added": 1, "fixed": 2, "persisting": 1, "severity_changed": 1 }
+}
+```
+
+任一分析编号不存在时返回 `404`：
+
+```json
+{ "detail": "基线分析记录不存在: 999999" }
+```
+
+#### issue 指纹与分类规则
+
+每条 issue 的**稳定指纹**由以下字段生成：方向（`direction`）、schema 路径
+（`path`）、问题代码（`code`）以及**规范化后的原因**（`reason`）。规范化会：
+
+- 剥离启发式降级后缀（引擎将 error 降级为 warning 时追加的说明文字）——
+  这样同一问题仅严重级别变化时指纹保持不变；
+- 压缩连续空白、去除首尾空白，使指纹对格式抖动免疫。
+
+指纹为 SHA-256 前 16 个十六进制字符，**不包含 severity**。按指纹对两份报告
+做多重集配对后，每条问题被分类为：
+
+| 分类              | 含义                                       |
+| ----------------- | ------------------------------------------ |
+| `added`           | 仅出现在当前报告 —— 新增问题               |
+| `fixed`           | 仅出现在基线报告 —— 已修复问题             |
+| `persisting`      | 两份报告都存在且严重级别相同 —— 仍存在     |
+| `severity_changed`| 两份报告都存在但严重级别不同 —— 仅级别变化 |
+
+`compatibility` 给出两个兼容方向（backward / forward）在两次分析间的变化，
+`summary_diff` 给出错误 / 警告 / 总数（含分方向）的基线值、当前值与差值。
 
 ### `GET /health`
 
