@@ -16,13 +16,15 @@
 ```
 .
 ├── app/
-│   ├── main.py          # FastAPI 路由：创建分析、查询报告
+│   ├── main.py          # FastAPI 路由：创建分析、查询报告、基线对比
 │   ├── compat.py        # 兼容性分析引擎（递归比较 + 最小反例生成）
+│   ├── compare.py       # 报告基线对比（稳定指纹 + 差异归类）
 │   ├── database.py      # SQLite / SQLAlchemy 初始化
 │   ├── models.py        # Analysis ORM 模型
 │   └── schemas.py       # Pydantic 请求 / 响应模型
 ├── tests/
 │   ├── test_compat.py   # 引擎单元测试（30+ 用例）
+│   ├── test_compare.py  # 基线对比引擎与接口测试
 │   └── test_api.py      # 接口端到端测试
 ├── Dockerfile
 ├── docker-compose.yml
@@ -246,6 +248,85 @@ curl http://localhost:8000/api/analyses/1
 ```
 
 记录不存在返回 `404`。
+
+### `POST /api/analyses/compare` — 基线对比两次分析报告
+
+对比**基线分析**与**当前分析**的报告，为每条 issue 计算**稳定指纹**
+（`方向 + path + code + 规范化原因` 的 SHA-256 前 16 位十六进制），
+据此把问题分为四类：
+
+| 分组 | 含义 |
+| ---- | ---- |
+| `added` | 当前报告新出现的问题 |
+| `fixed` | 基线中存在、当前已修复的问题 |
+| `persistent` | 两份报告都存在、严重级别不变的问题 |
+| `severity_changed` | 同一问题仅严重级别变化（如 warning → error） |
+
+原因文本的规范化规则：折叠连续空白、去除首尾空白，并移除启发式问题降级为
+warning 时追加的固定后缀「（未能自动构造出经过验证的反例，标记为潜在风险）」。
+因此同一启发式问题在 warning / error 之间只会被识别为 `severity_changed`，
+而不是"修复一条 + 新增一条"。指纹不包含 message、反例与严重级别等易变字段。
+
+请求体：
+
+| 字段 | 类型 | 必填 | 说明 |
+| ---- | ---- | ---- | ---- |
+| `baseline_id` | int | 是 | 作为基线的分析 ID |
+| `current_id` | int | 是 | 待对比的当前分析 ID |
+
+```bash
+curl -X POST http://localhost:8000/api/analyses/compare \
+  -H "Content-Type: application/json" \
+  -d '{"baseline_id": 1, "current_id": 2}'
+```
+
+响应（节选）：
+
+```json
+{
+  "baseline_id": 1,
+  "current_id": 2,
+  "compatibility": {
+    "backward": { "baseline": false, "current": false, "change": "unchanged" },
+    "forward":  { "baseline": false, "current": true,  "change": "improved" }
+  },
+  "summary": {
+    "baseline": { "backward": { "errors": 2, "warnings": 0, "total": 2 },
+                  "forward":  { "errors": 1, "warnings": 0, "total": 1 },
+                  "total": 3, "errors": 3, "warnings": 0 },
+    "current":  { "backward": { "errors": 2, "warnings": 0, "total": 2 },
+                  "forward":  { "errors": 0, "warnings": 0, "total": 0 },
+                  "total": 2, "errors": 2, "warnings": 0 },
+    "delta":    { "backward": { "errors": 0,  "warnings": 0, "total": 0 },
+                  "forward":  { "errors": -1, "warnings": 0, "total": -1 },
+                  "total": -1, "errors": -1, "warnings": 0 }
+  },
+  "counts": { "added": 1, "fixed": 2, "persistent": 1, "severity_changed": 0 },
+  "issues": {
+    "added": [
+      { "fingerprint": "9f2c1ab0d3e4f5a6", "direction": "backward",
+        "path": "#/properties/b", "code": "minimum_increased",
+        "severity": "error", "message": "新版下界收紧为 >= 5", "reason": "…" }
+    ],
+    "fixed": [],
+    "persistent": [],
+    "severity_changed": [
+      { "fingerprint": "ab01cd23ef456789", "direction": "backward",
+        "path": "#/properties/name", "code": "pattern_changed",
+        "baseline_severity": "warning", "current_severity": "error",
+        "message": "…", "reason": "…" }
+    ]
+  }
+}
+```
+
+说明：
+
+- `compatibility.<direction>.change`：`unchanged` / `improved`（不兼容 → 兼容）/
+  `regressed`（兼容 → 不兼容）；
+- `summary.delta` = 当前 − 基线，负数表示错误 / 警告减少；
+- 任一分析 ID 不存在时返回 `404`；
+- 对比是**纯只读**操作：不会修改、回写或删除任何已保存的分析报告。
 
 ### `GET /health`
 

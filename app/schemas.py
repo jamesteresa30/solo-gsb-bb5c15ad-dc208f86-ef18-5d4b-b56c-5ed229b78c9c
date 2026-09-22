@@ -77,3 +77,74 @@ class AnalysisListItem(BaseModel):
 class AnalysisListResponse(BaseModel):
     total: int
     items: list[AnalysisListItem]
+
+
+class CompareRequest(BaseModel):
+    """POST /api/analyses/compare 请求体。"""
+
+    baseline_id: int = Field(..., ge=1, description="作为基线的分析 ID")
+    current_id: int = Field(..., ge=1, description="待对比的当前分析 ID")
+
+
+class ComparedIssue(BaseModel):
+    """对比结果中的单条 issue（附稳定指纹）。"""
+
+    fingerprint: str
+    direction: str
+    path: str
+    code: str
+    severity: str
+    message: str
+    reason: str
+
+
+class SeverityChangedIssue(BaseModel):
+    """仅严重级别发生变化的 issue。"""
+
+    fingerprint: str
+    direction: str
+    path: str
+    code: str
+    message: str
+    reason: str
+    baseline_severity: str
+    current_severity: str
+
+
+class CompatibilityChange(BaseModel):
+    """单个兼容方向在两次分析间的变化。"""
+
+    baseline: bool
+    current: bool
+    change: Literal["unchanged", "improved", "regressed"]
+
+
+class CompareSummary(BaseModel):
+    """错误 / 警告汇总：基线、当前及两者差值（delta = current - baseline）。"""
+
+    baseline: ReportSummary
+    current: ReportSummary
+    delta: ReportSummary
+
+
+class CompareCounts(BaseModel):
+    added: int
+    fixed: int
+    persistent: int
+    severity_changed: int
+
+
+class CompareIssueGroups(BaseModel):
+    added: list[ComparedIssue]
+    fixed: list[ComparedIssue]
+    persistent: list[ComparedIssue]
+    severity_changed: list[SeverityChangedIssue]
+
+
+class CompareResponse(BaseModel):
+    baseline_id: int
+    current_id: int
+    compatibility: dict[str, CompatibilityChange]
+    summary: CompareSummary
+    counts: CompareCounts
+    issues: CompareIssueGroups

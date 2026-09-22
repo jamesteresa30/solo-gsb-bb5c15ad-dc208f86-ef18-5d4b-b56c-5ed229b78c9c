@@ -1,4 +1,4 @@
-"""FastAPI 入口：创建分析、查询报告。"""
+"""FastAPI 入口：创建分析、查询报告、基线对比。"""
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -7,13 +7,15 @@ from jsonschema.exceptions import SchemaError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import compat
+from app import compat, compare
 from app.database import get_db, init_db
 from app.models import Analysis
 from app.schemas import (
     AnalysisCreate,
     AnalysisListResponse,
     AnalysisResponse,
+    CompareRequest,
+    CompareResponse,
 )
 
 
@@ -27,9 +29,10 @@ app = FastAPI(
     title="JSON Schema 兼容性分析 API",
     description=(
         "递归比较旧版 / 新版 JSON Schema 的类型、必填字段、枚举、数组与组合关键字，"
-        "分别判断向后 / 向前兼容性，并生成最小反例路径与原因。"
+        "分别判断向后 / 向前兼容性，并生成最小反例路径与原因；"
+        "支持对两次分析报告做基线对比（新增 / 已修复 / 仍存在 / 仅严重级别变化）。"
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -75,6 +78,34 @@ def create_analysis(payload: AnalysisCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(record)
     return record.to_dict()
+
+
+@app.post(
+    "/api/analyses/compare",
+    response_model=CompareResponse,
+    tags=["analyses"],
+    summary="基线对比两次分析报告",
+)
+def compare_analyses(payload: CompareRequest, db: Session = Depends(get_db)):
+    baseline = db.get(Analysis, payload.baseline_id)
+    if baseline is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"基线分析记录不存在: id={payload.baseline_id}",
+        )
+    current = db.get(Analysis, payload.current_id)
+    if current is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"当前分析记录不存在: id={payload.current_id}",
+        )
+    # 纯只读对比：compare_reports 不修改、也不回写任何原始报告
+    result = compare.compare_reports(baseline.report, current.report)
+    return {
+        "baseline_id": baseline.id,
+        "current_id": current.id,
+        **result,
+    }
 
 
 @app.get(
